@@ -1,0 +1,233 @@
+import numpy as np
+import random
+from scipy import stats
+import matplotlib.pyplot as plt
+
+# Parameters
+
+P_init=1000               # initialise total Parasite biomass
+R_init=1000               # initalise total Resource biomass
+n_iterations=2000         # number of iterations
+tau=0.0001                # timestep
+b0=0.0001                 # baseline exploitation rate
+b1=0.0001                 # strain-dependent exploitation contribution
+theta=300                 # renewal rate
+d_R=0.06                  # baseline Resource mortality rate
+d_P0=0.1                  # baseline Parasite mortality rate
+d_P1=0.1                  # trait-dependent Parasite mortality contribution
+gamma=0.1                 # treatment application rate
+phi1=-2                   # treatment type, must be -2 <= phi1 <= 2
+zeta=1                    # fate parameter (zeta=1 for recovery without immunity, zeta=0 for immunity or definitive removal)
+mu_step=0.02              # random mutation step
+mu=1                      # mutation rate
+eps=1                     # R to P biomass conversion
+
+name_dataset = "name_dataset_2k22_1"
+
+name_rates_file = name_dataset + "_rates" + ".txt"
+rates = open(name_rates_file, "w")
+
+# compound constants
+
+mu_diff=mu/6*mu_step**2   # mutation diffusion coefficient
+phi11=1-phi1/2            # normalisation factor for treatment type
+
+# Predictions of the deterministic theory
+
+from scipy.optimize import fsolve
+import math
+from scipy.special import airy, jv, iv
+from numpy import sqrt, where
+import scipy.integrate as integrate
+
+def Ai(x):
+    (ai, ai_prime, bi, bi_prime) = airy(x)
+    return ai
+
+def Bi(x):
+    (ai, ai_prime, bi, bi_prime) = airy(x)
+    return bi
+
+def Aip(x):
+    (ai, ai_prime, bi, bi_prime) = airy(x)
+    return ai_prime
+
+def Bip(x):
+    (ai, ai_prime, bi, bi_prime) = airy(x)
+    return bi_prime
+
+def find_avg_vir_positive_Omega(p):
+    e=1/3;
+    delta0=(b1*(d_P0)-b0*d_P1-b0*gamma*phi1+b1*gamma*phi11)/(mu_diff*(b1*p+b0))
+    delta=abs(delta0)
+    C=-(Aip(p*delta**e)/Bip(p*delta**e))
+    C1, C1err =(integrate.quad(lambda z: (Ai((p-z)*delta**(1/3))+C*Bi((p-z)*delta**(1/3))),0,1))
+    avg, avgerr = integrate.quad(lambda z: C1**(-1)*(z*(Ai((p-z)*delta**(1/3))+C*Bi((p-z)*delta**(1/3)))),0,1)
+    return avg-p
+
+def find_avg_vir_negative_Omega(p):
+    e=1/3;
+    delta0=(b1*(d_P0)-b0*d_P1-b0*gamma*phi1+b1*gamma*phi11)/(mu_diff*(b1*(1-p)+b0))
+    delta=abs(delta0)
+    C=-(Aip(p*delta**e)/Bip(p*delta**e))
+    C1, C1err =(integrate.quad(lambda z: (Ai((p-z)*delta**(1/3))+C*Bi((p-z)*delta**(1/3))),0,1))
+    avg, avgerr = integrate.quad(lambda z: C1**(-1)*(z*(Ai((p-z)*delta**(1/3))+C*Bi((p-z)*delta**(1/3)))),0,1)
+    return avg-p
+
+Omega = (b1*(d_P0)-b0*d_P1-b0*gamma*phi1+b1*gamma*phi11)
+
+# Average strain value at endemic equilibrium
+
+if Omega >=0:
+    avg_x = fsolve(find_avg_vir_positive_Omega,1)
+else:
+    avg_x = 1 - fsolve(find_avg_vir_negative_Omega,1)
+
+# Average mortality, exploitation and treatment efficacy at endemic equilibrium
+
+avg_mortality=d_P0+d_P1*avg_x
+avg_exploitation=b0+b1*avg_x
+avg_efficacy=phi11+phi1*avg_x
+
+# Total Resource and Parasite biomass at equilibrium
+
+Req= min(theta/d_R, (avg_mortality+gamma*avg_efficacy)/(eps*avg_exploitation))
+Peq = max(0, (theta - d_R*Req)/((avg_mortality+gamma*avg_efficacy)/eps-zeta*gamma*avg_efficacy))
+
+# Print equilibrium state
+
+if Peq == 0:
+    avg_x=0
+    print("Disease extinction - Seq = {}".format(theta/d_R))
+else:  
+    print("R_eq = {}, P_eq = {}, average_trait = {}, Omega = {}, ".format(Req,Peq,avg_x,Omega))
+
+name_parameters_file = name_dataset + "_parameters" + ".txt"
+parameters = open(name_parameters_file, "w")
+parameters.write("P_init = " + str(P_init) + "\n")
+parameters.write("R_init = " + str(R_init) + "\n")
+parameters.write("n_iterations = " + str(n_iterations) + "\n")
+parameters.write("tau = " + str(tau) + "\n")
+parameters.write("b0 = " + str(b0) + "\n")
+parameters.write("b1 = " + str(b1) + "\n")
+parameters.write("d_R = " + str(d_R) + "\n")
+parameters.write("d_P0 = " + str(d_P0) + "\n")
+parameters.write("d_P1 = " + str(d_P1) + "\n")
+parameters.write("eps = " + str(eps) + "\n")
+parameters.write("zeta = " + str(zeta) + "\n")
+parameters.write("mu_step = " + str(mu_step) + "\n")
+parameters.write("mu = " + str(mu) + "\n")
+parameters.write("theta = " + str(theta) + "\n")
+parameters.write("gamma = " + str(gamma) + "\n")
+parameters.write("phi1 = " + str(phi1))
+parameters.close()
+
+# Stochastic processes
+
+def Mutation_event(x,y):            # Mutation event
+    r1=random.uniform(0,1);
+    rate=tau*mu*x.shape[0]
+    #rates.write(str(rate) + "|")  
+    if r1 <= rate:
+        idx=random.randint(0,x.shape[0]-1)
+        old_v=x[idx]
+        x[idx]+=random.uniform(-mu_step,+mu_step)
+        if x[idx] > 1 or x[idx] < 0:
+            x[idx]=old_v
+    return x, y
+
+def Exploitation_event(x,y):           # Infection event
+    r1=random.uniform(0,1)
+    idx=random.randint(0,x.shape[0]-1)
+    rate=tau*(b0+b1*x[idx])*x.shape[0]*y
+    #rates.write(str(rate) + "|")
+    if r1 <= rate:
+        y-=1
+        x=np.append(x,x[idx])
+    return x, y
+
+def Mortality_P_event(x,y):           # Mortality Parasite event
+    r1=random.uniform(0,1)
+    idx=random.randint(0,x.shape[0]-1)
+    rate=tau*(d_P0+d_P1*x[idx])*x.shape[0]
+    #rates.write(str(rate) + "|")
+    if r1 <= rate:
+        x = np.delete(x, idx)
+    return x, y
+
+def Renewal_event(x,y):             # Replanting event
+    rate=tau*theta
+    r1=random.uniform(0,1)
+    #rates.write(str(rate) + "|")
+    if r1 <= rate:
+        y+=1
+    return x, y
+
+def Mortality_R_event(x,y):             # Mortality Resource event
+    rate=tau*d_R*y
+    r1=random.uniform(0,1)
+    #rates.write(str(rate) + "|" + "\n")  
+    if r1 <= rate:
+        y-=1
+    return x, y
+
+def Treatment_event(x,y):
+    r1=random.uniform(0,1)
+    idx=random.randint(0,x.shape[0]-1)
+    rate=tau*gamma*(1-phi1/2+phi1*x[idx])*x.shape[0]
+    if r1 <= rate:
+        x = np.delete(x, idx)
+        y+=1*zeta
+    return x, y   
+
+# Initialise system
+
+P=np.zeros(P_init,dtype=float)
+R=R_init
+data=np.zeros([n_iterations,3])
+datahist=np.zeros([n_iterations,10])
+for i in range(P_init):
+    P[i]=random.uniform(0,1)
+
+# Agent-based simulation
+
+for i in range(0,n_iterations):
+    N_tot=P.shape[0]+R
+    print(i)
+    for j in range(0,N_tot):
+        P, R = Renewal_event(P,R)
+        P, R = Mutation_event(P,R)
+        P, R = Exploitation_event(P,R)
+        P, R = Mortality_P_event(P,R)
+        P, R = Mortality_R_event(P,R)
+        P, R = Treatment_event(P,R)
+
+
+    data[i,0]=P.shape[0]          # Total Parasite biomass at time-step i
+    data[i,1]=R                   # Total Resource biomass at time-step i
+    data[i,2]=np.mean(P)          # Average strain value x at time-step
+
+
+rates.close
+
+# Plot temporal trajectories
+
+plt.figure(1)
+plt.plot(data[:,0],'r')                        # Temporal trajectory P
+plt.plot(data[:,1],'b')                        # Temporal trajecotry R
+plt.hlines(Peq,0,n_iterations,'r','--')        # Equilibrium P deterministic theory
+plt.hlines(Req,0,n_iterations,'b','--')        # Equilibrium R deterministic theory
+plt.xlabel("timestep")
+plt.ylabel("biomass")
+plt.legend(['Parasite biomass', 'Resource biomass',])
+
+plt.figure(2)
+plt.plot(data[:,2],'k')                         # Temporal trajectory average strain value x
+plt.hlines(avg_x,0,n_iterations,'k','--')       # Equilibrium average trait x determistic theory
+plt.xlabel("timestep")
+plt.ylabel("average trait")
+
+# Save data
+np.savetxt(name_dataset + ".csv", data, delimiter=",")
+data_eq=np.array([Peq,Req,avg_x])
+np.savetxt(name_dataset + "_eq" + ".csv",data_eq,delimiter=",")
